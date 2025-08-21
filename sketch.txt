@@ -1,0 +1,233 @@
+#include <HX711.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <Keypad.h>
+#include <Servo.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ILI9341.h>
+#include <qrcode.h>
+
+// Initialization
+#define BUTTON_PIN 0
+
+QRCode qrCodeGenerator;
+
+#define LCD_ROWS 20
+#define LCD_COLS 4
+#define LCD_ADDRESS 0x27
+LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_COLS, LCD_ROWS);
+
+#define GATE1_SERVO_PIN 5
+#define GATE2_SERVO_PIN 6
+Servo servoGateOne;
+Servo servoGateTwo;
+
+#define SCALE_DT 2
+#define SCALE_SCK 3
+#define SCALE_CALIBRATION_FACTOR 420 // Will be Changed
+HX711 scale;
+
+#define KEYPAD_ROWS 4
+#define KEYPAD_COLS 3
+char KEYPAD_MAP[KEYPAD_ROWS][KEYPAD_COLS] = {
+  {'1', '2', '3'},
+  {'4', '5', '6'},
+  {'7', '8', '9'},
+  {'d', '0', 'e'}
+};
+byte KEYPAD_ROWS_PINS[KEYPAD_ROWS] = {A0, A1, A2, A3};
+byte KEYPAD_COLS_PINS[KEYPAD_COLS] = {4, 7, 12};
+Keypad keypad = Keypad(makeKeymap(KEYPAD_MAP), KEYPAD_ROWS_PINS, KEYPAD_COLS_PINS, KEYPAD_ROWS, KEYPAD_COLS);
+
+#define TFT_CS_PIN 10
+#define TFT_DC_PIN 9
+#define TFT_RST_PIN 8
+Adafruit_ILI9341 display = Adafruit_ILI9341(TFT_CS_PIN, TFT_DC_PIN, TFT_RST_PIN);
+
+// Utility Variables
+byte pricePerKg = 42;
+bool isWeightEntryScreenActive = true;
+bool isInitialDisplayPrinted = true;
+char pressedKey = ' ';
+bool isWeightInputAllowed = true;
+byte lcdCursorPositionOnWeightEntryScreen = 4;
+byte weightInputDigits[3] = {48, 48, 48};
+byte weightInputIndex = 0;
+float targetWeightLimit = 0.00;
+float calculatedAmount = 0;
+char amountAsString[8];
+float currentMeasuredWeight = 0.00;
+bool isQRCodeGenerated = false;
+float lastDisplayedWeight = 0.01;
+char UPI_ID[70] = "upi://pay?pa=hetalrshah184@okaxis&pn=hetal%20shah&am="; // Will Be Changed
+
+void reset() {
+  isWeightEntryScreenActive = true;
+  isInitialDisplayPrinted = true;
+  pressedKey = ' ';
+  isWeightInputAllowed = true;
+  lcdCursorPositionOnWeightEntryScreen = 4;
+  weightInputDigits[0] = weightInputDigits[1] = weightInputDigits[2] = 48;
+  weightInputIndex = 0;
+  targetWeightLimit = 0.00;
+  calculatedAmount = 0.00;
+  amountAsString[0] = amountAsString[1] = amountAsString[2] = amountAsString[3] = amountAsString[4] = amountAsString[5] = amountAsString[6] = amountAsString[7] = '\0';
+  currentMeasuredWeight = 0.00;
+  isQRCodeGenerated = false;
+  lastDisplayedWeight = 0.01;
+  UPI_ID[53] = UPI_ID[54] = UPI_ID[55] = UPI_ID[56] = UPI_ID[57] = UPI_ID[58] = UPI_ID[59] = UPI_ID[60] = UPI_ID[61] = UPI_ID[62] = UPI_ID[63] = UPI_ID[64] = UPI_ID[65] = UPI_ID[66] = UPI_ID[67] = UPI_ID[68] = UPI_ID[69] = '\0';
+  lcd.clear();
+}
+
+template <typename T>
+void printToLCD(byte x, byte y, T data) {
+  lcd.setCursor(x, y);
+  lcd.print(data);
+}
+
+void controlGateServo(Servo &servo, bool openGate) {
+  servo.write(openGate ? 180 : 0);
+}
+
+void generateQRCode(char* itemAmount) {
+
+  strcat(UPI_ID, itemAmount);
+  strcat(UPI_ID, "&cu=INR");
+
+  uint8_t qrCodeData[qrcode_getBufferSize(4)];
+  qrcode_initText(&qrCodeGenerator, qrCodeData, 4, ECC_LOW, UPI_ID);
+
+  byte scaleFactor = 6;
+  byte xOffset = (display.width() - qrCodeGenerator.size * scaleFactor) / 2;
+  byte yOffset = (display.height() - qrCodeGenerator.size * scaleFactor) / 2;
+
+  for (byte y = 0; y < qrCodeGenerator.size; y++) {
+    for (byte x = 0; x < qrCodeGenerator.size; x++) {
+      if (qrcode_getModule(&qrCodeGenerator, x, y)) {
+        display.fillRect(xOffset + x * scaleFactor, yOffset + y * scaleFactor, scaleFactor, scaleFactor, ILI9341_BLACK);
+      }
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(9600);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+  printToLCD(0, 0, F("Initializing..."));
+  printToLCD(0, 1, F("Please Wait."));
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  
+  scale.begin(SCALE_DT, SCALE_SCK);
+  scale.set_scale(SCALE_CALIBRATION_FACTOR);
+  scale.tare();
+
+  servoGateOne.attach(GATE1_SERVO_PIN);
+  servoGateTwo.attach(GATE2_SERVO_PIN);
+  controlGateServo(servoGateOne, false);
+  controlGateServo(servoGateTwo, false);
+
+  display.begin();
+  display.fillScreen(ILI9341_WHITE);
+
+  reset();
+}
+
+void loop() {
+  if (isWeightEntryScreenActive) {
+    if (isInitialDisplayPrinted) {
+      printToLCD(0, 0, F("Enter Weight In"));
+      printToLCD(0, 1, F("Kg:"));
+      printToLCD(0, 2, F("Price Per Kg:"));
+      printToLCD(14, 2, pricePerKg);
+      printToLCD(17, 2, F("Rs"));
+      printToLCD(0, 3, F("Maximum Weight 2 Kg"));
+
+      isInitialDisplayPrinted = false;
+    }
+
+    pressedKey = keypad.getKey();
+    if (pressedKey != 'e' && pressedKey != 'r' && pressedKey != ' ' && isWeightInputAllowed) {
+      if (lcdCursorPositionOnWeightEntryScreen <= 7 && pressedKey) {
+        printToLCD(lcdCursorPositionOnWeightEntryScreen, 1, pressedKey);
+        weightInputDigits[weightInputIndex] = pressedKey;
+
+        if (weightInputIndex != 2) {
+          lcdCursorPositionOnWeightEntryScreen++;
+          weightInputIndex++;
+        }
+        else {
+          isWeightInputAllowed = false;
+        }
+
+        if (weightInputIndex == 1) {
+          printToLCD(lcdCursorPositionOnWeightEntryScreen, 1, F(".0"));
+          lcdCursorPositionOnWeightEntryScreen++;
+        }
+      }
+    }
+
+    if (pressedKey == 'e') {
+      targetWeightLimit = (weightInputDigits[0] - 48) + ((weightInputDigits[1] - 48) / 10.00) + ((weightInputDigits[2] - 48) / 100.00);
+      lcd.clear();
+
+      if (targetWeightLimit <= 2.00) {
+        calculatedAmount = pricePerKg * targetWeightLimit;
+        dtostrf(calculatedAmount, 6, 2, amountAsString);
+
+        printToLCD(0, 0, F("Price Per Kg:"));
+        printToLCD(14, 0, pricePerKg);
+        printToLCD(17, 0, F("Rs"));
+        printToLCD(0, 1, F("Target Wt.:"));
+        printToLCD(12, 1, targetWeightLimit);
+        printToLCD(17, 1, F("Kg"));
+        printToLCD(0, 2, F("Weight:"));
+        printToLCD(0, 3, F("Amount:"));
+        printToLCD(8, 3, calculatedAmount);
+        lcd.print(F(" Rs"));
+
+        isWeightEntryScreenActive = false;
+      }
+      else {
+        printToLCD(0, 0, F("Maximum Weight 2 Kg"));
+        delay(3000);
+        reset();
+      }
+    }
+
+    if (pressedKey == 'd') {
+      reset();
+    }
+  }
+  else {
+    currentMeasuredWeight = scale.get_units();
+
+    if (!isQRCodeGenerated) {
+      generateQRCode(amountAsString);
+      isQRCodeGenerated = true;
+    }
+
+    if (digitalRead(BUTTON_PIN) == LOW) {
+      controlGateServo(servoGateOne, true);
+    }
+
+    if (abs(currentMeasuredWeight - lastDisplayedWeight) > 0.01 && isQRCodeGenerated) {
+      printToLCD(8, 2, currentMeasuredWeight);
+      printToLCD(13, 2, F("Kg"));
+
+      lastDisplayedWeight = currentMeasuredWeight;
+    }
+
+    if (currentMeasuredWeight >= targetWeightLimit){
+      controlGateServo(servoGateOne, false);
+      controlGateServo(servoGateTwo, true);
+      delay(30000);
+      display.fillScreen(ILI9341_WHITE);
+      controlGateServo(servoGateTwo, false);
+      reset();
+    }
+  }
+}
