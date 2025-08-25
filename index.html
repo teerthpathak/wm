@@ -71,7 +71,7 @@
                         <input type="number" class="form-control my-3" placeholder="Enter Price per Kg"
                             id="updatePriceInput" style="text-align: center;">
                         <button class="btn btn-primary w-100"
-                            onclick="setFirebaseData('/control/price', document.getElementById('updatePriceInput').value.toString()); document.getElementById('updatePriceInput').value = ''; ">Update</button>
+                            onclick="setFirebaseData('/control/price', document.getElementById('updatePriceInput').value); document.getElementById('updatePriceInput').value = ''; ">Update</button>
                     </div>
                 </div>
             </div>
@@ -113,5 +113,6 @@
         document.getElementById("price").innerText = snapshot.val() + " ₹/Kg";
     });
 </script>
+
 
 </html>
